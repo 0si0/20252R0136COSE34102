@@ -125,6 +125,7 @@ userinit(void)
 
   p = allocproc();
   
+  p->priority = 5;
   initproc = p;
   if((p->pgdir = setupkvm()) == 0)
     panic("userinit: out of memory?");
@@ -199,6 +200,7 @@ fork(void)
   np->sz = curproc->sz;
   np->parent = curproc;
   *np->tf = *curproc->tf;
+  np->priority = curproc->priority;
 
   // Clear %eax so that fork returns 0 in the child.
   np->tf->eax = 0;
@@ -542,9 +544,14 @@ setnice(int pid, int nice)
     struct proc *p;
     acquire(&ptable.lock);
 
-    /* ******************** */
-    /* * WRITE YOUR CODE    */
-    /* ******************** */
+    for (p = ptable.proc; p < &ptable.proc[NPROC]; p++)
+    {
+        if (p->pid == pid) {
+            p->priority = nice;
+            release(&ptable.lock);
+            return 0;
+        }
+    }
 
     release(&ptable.lock);
     return -1;
@@ -556,9 +563,14 @@ getnice(int pid)
     struct proc *p;
     acquire(&ptable.lock);
     
-    /* ******************** */
-    /* * WRITE YOUR CODE    */
-    /* ******************** */
+    for (p = ptable.proc; p < &ptable.proc[NPROC]; p++)
+    {
+        if (p->pid == pid) {
+            int value = p->priority;
+            release(&ptable.lock);
+            return value;
+        }
+    }
 
     release(&ptable.lock);
     return -1;
@@ -571,9 +583,29 @@ ps(void)
     acquire(&ptable.lock);
     cprintf("name\tpid\tppid\tmem\tprio\tstate\n");
 
-    /* ******************** */
-    /* * WRITE YOUR CODE    */
-    /* ******************** */
+    for (p = ptable.proc; p < &ptable.proc[NPROC]; p++)
+    {
+        int ppid = p->parent ? p->parent->pid : -1;
+        char* state = "";
+        switch (p->state)
+        {
+        case RUNNABLE:
+            state = "RUNNABLE";
+            cprintf("%s\t%d\t%d\t%d\t%d\t%s\n", p->name, p->pid, ppid, p->sz, p->priority, state);
+            break;
+        case RUNNING:
+            state = "RUNNING";
+            cprintf("%s\t%d\t%d\t%d\t%d\t%s\n", p->name, p->pid, ppid, p->sz, p->priority, state);
+            break;
+        case SLEEPING:
+            state = "SLEEPING";
+            cprintf("%s\t%d\t%d\t%d\t%d\t%s\n", p->name, p->pid, ppid, p->sz, p->priority, state);
+            break;
+        default:
+            break;
+        }  
+        
+    }
 
     release(&ptable.lock);
     return;
