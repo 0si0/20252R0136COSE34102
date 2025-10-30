@@ -12,6 +12,10 @@ struct {
     struct proc proc[NPROC];
 } ptable;
 
+static struct proc* rq[31];           
+static struct proc* rnext[NPROC];        
+static char in_ready[NPROC];
+
 static struct proc* initproc;
 
 int nextpid = 1;
@@ -151,6 +155,16 @@ userinit(void)
     acquire(&ptable.lock);
 
     p->state = RUNNABLE;
+    int index = p - ptable.proc;
+    if (!in_ready[index]) {
+        int pr = p->priority;
+        struct proc** cur = &rq[pr];
+        while (*cur && (*cur)->pid > p->pid)
+            cur = &rnext[(*cur - ptable.proc)];
+        rnext[index] = *cur;
+        *cur = p;
+        in_ready[index] = 1;
+    }
 
     release(&ptable.lock);
 }
@@ -220,6 +234,16 @@ fork(void)
     acquire(&ptable.lock);
 
     np->state = RUNNABLE;
+    int index = np - ptable.proc;
+    if (!in_ready[index]) {
+        int pr = np->priority;
+        struct proc** cur = &rq[pr];
+        while (*cur && (*cur)->pid > np->pid) 
+            cur = &rnext[(*cur - ptable.proc)];
+        rnext[index] = *cur;
+        *cur = np;
+        in_ready[index] = 1;
+    }
 
     release(&ptable.lock);
 
@@ -327,36 +351,41 @@ wait(void)
 void
 scheduler(void)
 {
-    struct proc* p;
+    
     struct cpu* c = mycpu();
     c->proc = 0;
 
     for (;;) {
         // Enable interrupts on this processor.
         sti();
-
         // Loop over process table looking for process to run.
         acquire(&ptable.lock);
-        for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
-            if (p->state != RUNNABLE)
-                continue;
 
-            // Switch to chosen process.  It is the process's job
-            // to release ptable.lock and then reacquire it
-            // before jumping back to us.
-            c->proc = p;
-            switchuvm(p);
-            p->state = RUNNING;
-
-            swtch(&(c->scheduler), p->context);
-            switchkvm();
-
-            // Process is done running for now.
-            // It should have changed its p->state before coming back.
-            c->proc = 0;
+        struct proc* p = 0;
+        for (int pr = 0; pr <= 30; pr++) {
+            if (rq[pr]) {
+                p = rq[pr];
+                rq[pr] = rnext[p - ptable.proc];
+                rnext[p - ptable.proc] = 0;
+                in_ready[p - ptable.proc] = 0;
+                break;
+            }
         }
-        release(&ptable.lock);
 
+        if (!p) {       
+            release(&ptable.lock);
+            continue;
+        }
+
+        c->proc = p;
+        switchuvm(p);
+        p->state = RUNNING;
+
+        swtch(&c->scheduler, p->context);
+        switchkvm();
+
+        c->proc = 0;     
+        release(&ptable.lock);
     }
 }
 
@@ -391,7 +420,20 @@ void
 yield(void)
 {
     acquire(&ptable.lock);  //DOC: yieldlock
-    myproc()->state = RUNNABLE;
+    struct proc* p = myproc();
+
+    p->state = RUNNABLE;
+
+    int index = p - ptable.proc;
+    if (!in_ready[index]) {
+        int pr = p->priority;
+        struct proc** cur = &rq[pr];
+        while (*cur && (*cur)->pid > p->pid)
+            cur = &rnext[(*cur - ptable.proc)];
+        rnext[index] = *cur;
+        *cur = p;
+        in_ready[index] = 1;
+    }
     sched();
     release(&ptable.lock);
 }
@@ -465,8 +507,19 @@ wakeup1(void* chan)
     struct proc* p;
 
     for (p = ptable.proc; p < &ptable.proc[NPROC]; p++)
-        if (p->state == SLEEPING && p->chan == chan)
+        if (p->state == SLEEPING && p->chan == chan) {
             p->state = RUNNABLE;
+            int index = p - ptable.proc;
+            if (!in_ready[index]) {
+                int pr = p->priority;
+                struct proc** cur = &rq[pr];
+                while (*cur && (*cur)->pid > p->pid)
+                    cur = &rnext[(*cur - ptable.proc)];
+                rnext[index] = *cur;
+                *cur = p;
+                in_ready[index] = 1;
+            }
+        }
 }
 
 // Wake up all processes sleeping on chan.
@@ -491,14 +544,26 @@ kill(int pid)
         if (p->pid == pid) {
             p->killed = 1;
             // Wake process from sleep if necessary.
-            if (p->state == SLEEPING)
+            if (p->state == SLEEPING) {
                 p->state = RUNNABLE;
+                int index = p - ptable.proc;
+                if (!in_ready[index]) {
+                    int pr = p->priority;
+                    struct proc** cur = &rq[pr];
+                    while (*cur && (*cur)->pid > p->pid)
+                        cur = &rnext[(*cur - ptable.proc)];
+                    rnext[index] = *cur;
+                    *cur = p;
+                    in_ready[index] = 1;
+                }
+            }
             release(&ptable.lock);
             return 0;
         }
     }
     release(&ptable.lock);
     return -1;
+
 }
 
 //PAGEBREAK: 36
@@ -548,7 +613,33 @@ setnice(int pid, int nice)
     acquire(&ptable.lock);
     for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
         if (p->pid == pid) {
+            
+            int oldpr = p->priority;
+
+            if (p->state == RUNNABLE && in_ready[p - ptable.proc]) {
+                int pr = oldpr;
+                struct proc** cur = &rq[pr];
+                while (*cur && *cur != p)
+                    cur = &rnext[(*cur - ptable.proc)];
+                if (*cur == p) {
+                    *cur = rnext[p - ptable.proc];
+                    rnext[p - ptable.proc] = 0;
+                    in_ready[p - ptable.proc] = 0;
+                }
+            }
             p->priority = nice;
+            if (p->state == RUNNABLE) {
+                int index = p - ptable.proc;
+                if (!in_ready[index]) {
+                    int pr = p->priority;
+                    struct proc** cur = &rq[pr];
+                    while (*cur && (*cur)->pid > p->pid)
+                        cur = &rnext[(*cur - ptable.proc)];
+                    rnext[index] = *cur;
+                    *cur = p;
+                    in_ready[index] = 1;
+                }
+            }
             release(&ptable.lock);
             return 0;
         }
@@ -557,3 +648,4 @@ setnice(int pid, int nice)
     release(&ptable.lock);
     return -1;
 }
+
