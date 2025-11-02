@@ -245,6 +245,30 @@ fork(void)
         in_ready[index] = 1;
     }
 
+    struct proc* curp = mycpu()->proc;
+    if (curp && curp->state == RUNNING) {
+        int cur_pr = curp->priority;
+        int np_pr = np->priority;
+
+        int need_preempt = (np_pr < cur_pr) || (np_pr == cur_pr && np->pid > curp->pid);
+        if (need_preempt) {
+            int cidx = curp - ptable.proc;
+            curp->state = RUNNABLE;
+
+            if (!in_ready[cidx]) {
+                int cpr = curp->priority;
+                struct proc** ins = &rq[cpr];
+                while (*ins && (*ins)->pid > curp->pid)
+                    ins = &rnext[(*ins - ptable.proc)];
+                rnext[cidx] = *ins;
+                *ins = curp;
+                in_ready[cidx] = 1;
+            }
+            
+            sched();
+
+        }
+    }
     release(&ptable.lock);
 
     return pid;
@@ -257,7 +281,7 @@ void
 exit(void)
 {
     struct proc* curproc = myproc();
-    struct proc* p;
+    struct proc* p; 
     int fd;
 
     if (curproc == initproc)
@@ -278,10 +302,6 @@ exit(void)
 
     acquire(&ptable.lock);
 
-    // Parent might be sleeping in wait().
-    wakeup1(curproc->parent);
-
-    // Pass abandoned children to init.
     for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
         if (p->parent == curproc) {
             p->parent = initproc;
@@ -290,11 +310,14 @@ exit(void)
         }
     }
 
-    // Jump into the scheduler, never to return.
     curproc->state = ZOMBIE;
+
+    wakeup1(curproc->parent);
+
     sched();
     panic("zombie exit");
 }
+
 
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
@@ -371,11 +394,19 @@ scheduler(void)
                 break;
             }
         }
+        
 
         if (!p) {       
             release(&ptable.lock);
             continue;
         }
+
+        if (p->state != RUNNABLE || p->kstack == 0 || p->pgdir == 0)
+        {
+            release(&ptable.lock);
+            continue;
+        }
+      
 
         c->proc = p;
         switchuvm(p);
@@ -519,6 +550,30 @@ wakeup1(void* chan)
                 *cur = p;
                 in_ready[index] = 1;
             }
+            
+            struct proc* curp = mycpu()->proc;
+            
+            if (curp && curp->state == RUNNING) {
+                
+                int np_pr = p->priority;
+                int cur_pr = curp->priority;
+                int need_preempt = (np_pr < cur_pr) || (np_pr == cur_pr && p->pid > curp->pid);
+                if (need_preempt) {
+                    int cidx = curp - ptable.proc;
+                    curp->state = RUNNABLE;
+
+                    if (!in_ready[cidx]) {
+                        int cpr = curp->priority;
+                        struct proc** ins = &rq[cpr];
+                        while (*ins && (*ins)->pid > curp->pid)
+                            ins = &rnext[(*ins - ptable.proc)];
+                        rnext[cidx] = *ins;
+                        *ins = curp;
+                        in_ready[cidx] = 1;
+                    }
+                    sched();
+                }
+            }
         }
 }
 
@@ -556,6 +611,30 @@ kill(int pid)
                     *cur = p;
                     in_ready[index] = 1;
                 }
+
+                struct proc* curp = mycpu()->proc;
+                if (curp && curp->state == RUNNING) {
+                    int cur_pr = curp->priority;
+                    int np_pr = p->priority;
+
+                    int need_preempt = (np_pr < cur_pr) || (np_pr == cur_pr && p->pid > curp->pid);
+                    if (need_preempt) {
+                        int cidx = curp - ptable.proc;
+                        curp->state = RUNNABLE;
+
+                        if (!in_ready[cidx]) {
+                            int cpr = curp->priority;
+                            struct proc** ins = &rq[cpr];
+                            while (*ins && (*ins)->pid > curp->pid)
+                                ins = &rnext[(*ins - ptable.proc)];
+                            rnext[cidx] = *ins;
+                            *ins = curp;
+                            in_ready[cidx] = 1;
+                        }
+                        sched();
+
+                    }
+                }
             }
             release(&ptable.lock);
             return 0;
@@ -563,7 +642,6 @@ kill(int pid)
     }
     release(&ptable.lock);
     return -1;
-
 }
 
 //PAGEBREAK: 36
@@ -638,6 +716,28 @@ setnice(int pid, int nice)
                     rnext[index] = *cur;
                     *cur = p;
                     in_ready[index] = 1;
+                }
+            }
+            struct proc* curp = mycpu()->proc;
+            if (curp && curp->state == RUNNING) {
+                int cur_pr = curp->priority;
+                int np_pr = p->priority;
+
+                int need_preempt = (np_pr < cur_pr) || (np_pr == cur_pr && p->pid > curp->pid);
+                if (need_preempt) {
+                    int cidx = curp - ptable.proc;
+                    curp->state = RUNNABLE;
+
+                    if (!in_ready[cidx]) {
+                        int cpr = curp->priority;
+                        struct proc** ins = &rq[cpr];
+                        while (*ins && (*ins)->pid > curp->pid)
+                            ins = &rnext[(*ins - ptable.proc)];
+                        rnext[cidx] = *ins;
+                        *ins = curp;
+                        in_ready[cidx] = 1;
+                    }
+                    sched();
                 }
             }
             release(&ptable.lock);
