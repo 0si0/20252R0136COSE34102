@@ -318,7 +318,6 @@ copyuvm(pde_t *pgdir, uint sz)
   pde_t *d;
   pte_t *pte;
   uint pa, i, flags;
-  char *mem;
 
   if((d = setupkvm()) == 0)
     return 0;
@@ -329,14 +328,17 @@ copyuvm(pde_t *pgdir, uint sz)
       panic("copyuvm: page not present");
     pa = PTE_ADDR(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto bad;
-    memmove(mem, (char*)P2V(pa), PGSIZE);
-    if(mappages(d, (void*)i, PGSIZE, V2P(mem), flags) < 0) {
-      kfree(mem);
-      goto bad;
-    }
+    
+    flags &= ~PTE_W;
+    *pte &= ~PTE_W;
+
+    if (mappages(d, (void*)i, PGSIZE, pa, flags) < 0)
+        goto bad;
+
+    inc_refcount(pa);
+
   }
+  lcr3(V2P(pgdir));
   return d;
 
 bad:
@@ -388,14 +390,69 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
 void
 page_fault(void)
 {
-  uint va = rcr2();
-  if(va < 0) {
-    panic("Invalid access");
+    struct proc* curproc = myproc();
+    if (curproc == 0) {
+        panic("page_fault: no current process");
+    }
+
+    uint va = rcr2();
+    uint va_aligned = PGROUNDDOWN(va);
+
+    if (va_aligned >= curproc->sz || va_aligned >= KERNBASE) {
+        cprintf("page_fault: invalid addr %p\n", va_aligned);
+        curproc->killed = 1;
+        return;
+    }
+
+    pte_t* pte = walkpgdir(curproc->pgdir, (char*)va_aligned, 0);
+    if (pte == 0 || !(*pte & PTE_P) || !(*pte & PTE_U)) {
+        cprintf("page_fault: no valid pte for addr %p\n", va_aligned);
+        curproc->killed = 1;
+        return;
+    }
+
+    uint pa = PTE_ADDR(*pte);
+    uint flags = PTE_FLAGS(*pte);
+
+    if (flags & PTE_W) {
+        cprintf("page_fault: writable page fault?! addr %p\n", va_aligned);
+        curproc->killed = 1;
+        return;
+    }
+
+    uint ref = get_refcount(pa);
+    if (ref == 0) {
+        cprintf("page_fault: refcount 0 for pa %p\n", pa);
+        curproc->killed = 1;
+        return;
+    }
+
+    if (ref > 1) {
+        char* mem = kalloc();
+        if (mem == 0) {
+            cprintf("page_fault: kalloc failed\n");
+            curproc->killed = 1;
+            return;
+        }
+
+        memmove(mem, (char*)P2V(pa), PGSIZE);
+
+        dec_refcount(pa);
+
+        flags |= PTE_W;   
+        *pte = V2P(mem) | flags;
+
+    }
+    else {
+        flags |= PTE_W;
+        *pte = pa | flags;
+    }
+
+    lcr3(V2P(curproc->pgdir));
+
     return;
-  }
-  
-  return;
 }
+
 
 //PAGEBREAK!
 // Blank page.
